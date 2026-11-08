@@ -1,0 +1,115 @@
+name: Build WordPress Release ZIP
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'itk-woocommerce-gratisprodukt.php'
+      - 'readme.txt'
+      - 'uninstall.php'
+      - '.github/workflows/build-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Plugin-Version auslesen
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^ \* Version:[[:space:]]*//p' itk-woocommerce-gratisprodukt.php | head -n1 | tr -d '\r')"
+
+          if [ -z "$VERSION" ]; then
+            echo "Plugin-Version konnte nicht ausgelesen werden."
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: PHP-Syntax prüfen
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -l itk-woocommerce-gratisprodukt.php
+          php -l uninstall.php
+
+      - name: Release-ZIP bauen
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+          PLUGIN_DIR="itk-woocommerce-gratisprodukt"
+          VERSIONED_ZIP="itk-woocommerce-gratisprodukt-v${VERSION}.zip"
+          LATEST_ZIP="itk-woocommerce-gratisprodukt.zip"
+
+          rm -rf "$PLUGIN_DIR" "$VERSIONED_ZIP" "$LATEST_ZIP"
+          mkdir -p "$PLUGIN_DIR"
+
+          cp itk-woocommerce-gratisprodukt.php "$PLUGIN_DIR/"
+          cp readme.txt "$PLUGIN_DIR/"
+          cp uninstall.php "$PLUGIN_DIR/"
+
+          zip -r "$VERSIONED_ZIP" "$PLUGIN_DIR"
+          cp "$VERSIONED_ZIP" "$LATEST_ZIP"
+
+          echo "versioned_zip=$VERSIONED_ZIP" >> "$GITHUB_OUTPUT"
+          echo "latest_zip=$LATEST_ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Versions-Tag prüfen und erstellen
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.version.outputs.tag }}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            TAG_SHA="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')"
+
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "Der Tag $TAG existiert bereits für einen anderen Commit."
+              echo "Bitte vor einer neuen funktionierenden Änderung die Plugin-Version erhöhen."
+              exit 1
+            fi
+          else
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "$TAG"
+          fi
+
+      - name: GitHub Release erstellen und WordPress-ZIP hochladen
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          VERSIONED_ZIP="${{ steps.package.outputs.versioned_zip }}"
+          LATEST_ZIP="${{ steps.package.outputs.latest_zip }}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$VERSIONED_ZIP" "$LATEST_ZIP" --clobber
+          else
+            gh release create "$TAG" \
+              "$VERSIONED_ZIP" \
+              "$LATEST_ZIP" \
+              --title "Alowidat Gratisprodukt v$VERSION" \
+              --generate-notes
+          fi
